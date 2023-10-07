@@ -9,6 +9,8 @@
 [![GitHub license](https://img.shields.io/badge/license-Apache%202-blue.svg)](https://raw.githubusercontent.com/vdenotaris/spring-boot-security-saml-sample/master/LICENSE)
 
 ---------
+# 分支描述
+本分支进行了一些开发，使得当前项目可以作为SP接入Mujina开源项目[mujina](https://github.com/biggerboy/Mujina.git)，Mujina开源项目包含IDP和SP。
 
 <img src="https://i.ibb.co/CKbFBzH/logo-small.png" align="right" />
 

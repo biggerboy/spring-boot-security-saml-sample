@@ -16,25 +16,29 @@
 
 package com.vdenotaris.spring.boot.security.saml.web.config;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Timer;
+import java.io.IOException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.cert.CertificateException;
+import java.security.spec.InvalidKeySpecException;
+import java.util.*;
 
+import com.vdenotaris.spring.boot.security.saml.web.core.ResourceMetadataProvider;
 import org.apache.commons.httpclient.HttpClient;
 import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
 import org.apache.velocity.app.VelocityEngine;
 import org.opensaml.saml2.metadata.provider.HTTPMetadataProvider;
 import org.opensaml.saml2.metadata.provider.MetadataProvider;
 import org.opensaml.saml2.metadata.provider.MetadataProviderException;
+import org.opensaml.xml.parse.BasicParserPool;
 import org.opensaml.xml.parse.ParserPool;
 import org.opensaml.xml.parse.StaticBasicParserPool;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.DefaultResourceLoader;
@@ -102,21 +106,38 @@ import com.vdenotaris.spring.boot.security.saml.web.core.SAMLUserDetailsServiceI
 @EnableWebSecurity
 @EnableGlobalMethodSecurity(securedEnabled = true)
 public class WebSecurityConfig extends WebSecurityConfigurerAdapter implements InitializingBean, DisposableBean {
- 
-	private Timer backgroundTaskTimer;
-	private MultiThreadedHttpConnectionManager multiThreadedHttpConnectionManager;
+    @Value("${sp.entity_id}")
+    private String spEntityId;
+    @Value("${sp.base_url}")
+    private String spBaseUrl;
+    @Value("${sp.private_key}")
+    private String spPrivateKey;
+    @Value("${sp.idp_metadata_url}")
+    private String identityProviderMetadataUrl;
+    @Value("${sp.certificate}")
+    private String spCertificate;
 
+    @Value("${sp.passphrase}")
+    private String spPassphrase;
+    @Value("${sp.use_local_idp_metadata_url}")
+    private boolean useLocalIdpMetaDataUrl;
+
+    @Value("${sp.idp_remote_metadata_url}")
+    private String idpSSOCircleMetadataURL;
+    private Timer backgroundTaskTimer;
+    private MultiThreadedHttpConnectionManager multiThreadedHttpConnectionManager;
+    private final DefaultResourceLoader defaultResourceLoader = new DefaultResourceLoader();
 	public void init() {
 		this.backgroundTaskTimer = new Timer(true);
 		this.multiThreadedHttpConnectionManager = new MultiThreadedHttpConnectionManager();
 	}
 
-	public void shutdown() {
-		this.backgroundTaskTimer.purge();
-		this.backgroundTaskTimer.cancel();
-		this.multiThreadedHttpConnectionManager.shutdown();
-	}
-	
+    public void shutdown() {
+        this.backgroundTaskTimer.purge();
+        this.backgroundTaskTimer.cancel();
+        this.multiThreadedHttpConnectionManager.shutdown();
+    }
+
     @Autowired
     private SAMLUserDetailsServiceImpl samlUserDetailsServiceImpl;
      
@@ -208,15 +229,17 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter implements I
  
     // Central storage of cryptographic keys
     @Bean
-    public KeyManager keyManager() {
-        DefaultResourceLoader loader = new DefaultResourceLoader();
-        Resource storeFile = loader
-                .getResource("classpath:/saml/samlKeystore.jks");
-        String storePass = "nalle123";
-        Map<String, String> passwords = new HashMap<String, String>();
-        passwords.put("apollo", "nalle123");
-        String defaultKey = "apollo";
-        return new JKSKeyManager(storeFile, storePass, passwords, defaultKey);
+    public KeyManager keyManager() throws CertificateException, IOException, NoSuchAlgorithmException, InvalidKeySpecException, KeyStoreException {
+//        DefaultResourceLoader loader = new DefaultResourceLoader();
+//        Resource storeFile = loader.getResource("classpath:/saml/samlKeystore.jks");
+//        String storePass = "nalle123";
+//        Map<String, String> passwords = new HashMap<String, String>();
+//        passwords.put("apollo", "nalle123");
+//        String defaultKey = "apollo";
+
+        KeyStore keyStore = KeyStoreLocator.createKeyStore("secret");
+        KeyStoreLocator.addPrivateKey(keyStore, spEntityId, spPrivateKey, spCertificate, spPassphrase);
+        return new JKSKeyManager(keyStore, Collections.singletonMap(spEntityId, spPassphrase), spEntityId);
     }
     
     @Bean
@@ -269,6 +292,28 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter implements I
 		backgroundTaskTimer.purge();
 		return extendedMetadataDelegate;
 	}
+    @Bean
+    @Qualifier("idp-mujina")
+    public ExtendedMetadataDelegate ssoMujinaMetadataProvider() throws MetadataProviderException {
+        MetadataProvider metadataProvider;
+        if (useLocalIdpMetaDataUrl) {
+            //第1种：使用本地Metadata文件
+            Resource resource = defaultResourceLoader.getResource(identityProviderMetadataUrl);
+            ResourceMetadataProvider resourceMetadataProvider = new ResourceMetadataProvider(resource);
+            resourceMetadataProvider.setParserPool(parserPool());
+            metadataProvider = resourceMetadataProvider;
+        } else {
+            //第2种：远程请求MetaData
+            HTTPMetadataProvider provider = new HTTPMetadataProvider(this.backgroundTaskTimer, httpClient(), idpSSOCircleMetadataURL);
+            provider.setParserPool(parserPool());
+            metadataProvider = provider;
+        }
+        ExtendedMetadataDelegate metadataDelegate = new ExtendedMetadataDelegate(metadataProvider, extendedMetadata());
+        metadataDelegate.setMetadataTrustCheck(true);
+        metadataDelegate.setMetadataRequireSignature(false);
+        backgroundTaskTimer.purge();
+        return metadataDelegate;
+    }
 
     // IDP Metadata configuration - paths to metadata of IDPs in circle of trust
     // is here
@@ -278,14 +323,16 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter implements I
     public CachingMetadataManager metadata() throws MetadataProviderException {
         List<MetadataProvider> providers = new ArrayList<MetadataProvider>();
         providers.add(ssoCircleExtendedMetadataProvider());
+        providers.add(ssoMujinaMetadataProvider());
         return new CachingMetadataManager(providers);
     }
  
     // Filter automatically generates default SP metadata
     @Bean
-    public MetadataGenerator metadataGenerator() {
+    public MetadataGenerator metadataGenerator() throws CertificateException, IOException, NoSuchAlgorithmException, InvalidKeySpecException, KeyStoreException {
         MetadataGenerator metadataGenerator = new MetadataGenerator();
-        metadataGenerator.setEntityId("com:vdenotaris:spring:sp");
+        metadataGenerator.setEntityId(spEntityId);
+        metadataGenerator.setEntityBaseURL(spBaseUrl);
         metadataGenerator.setExtendedMetadata(extendedMetadata());
         metadataGenerator.setIncludeDiscoveryExtension(false);
         metadataGenerator.setKeyManager(keyManager()); 
@@ -338,7 +385,7 @@ public class WebSecurityConfig extends WebSecurityConfigurerAdapter implements I
     }
      
     @Bean
-    public MetadataGeneratorFilter metadataGeneratorFilter() {
+    public MetadataGeneratorFilter metadataGeneratorFilter() throws CertificateException, IOException, NoSuchAlgorithmException, InvalidKeySpecException, KeyStoreException {
         return new MetadataGeneratorFilter(metadataGenerator());
     }
      
